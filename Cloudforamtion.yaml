@@ -1,0 +1,599 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Deploy an EC2 instance with Juice Shop for security assessment with
+  enhanced security features
+
+Parameters:
+  KeyPairName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instance
+    Type: AWS::EC2::KeyPair::KeyName
+    ConstraintDescription: Must be the name of an existing EC2 KeyPair.
+    Default: test1
+
+  InstanceName:
+    Description: Name of the EC2 instance for identification.
+    Type: String
+    Default: VulnerableInstance
+
+  AMIId:
+    Description: The AMI ID to be used for the EC2 instance. Default is Amazon Linux 2023.
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+  VpcCidr:
+    Description: CIDR block for the VPC.
+    Default: 10.0.0.0/16
+    Type: String
+
+  PublicSubnetCidr1:
+    Description: CIDR block for the first public subnet.
+    Default: 10.0.1.0/24
+    Type: String
+
+  PublicSubnetCidr2:
+    Description: CIDR block for the second public subnet.
+    Default: 10.0.3.0/24
+    Type: String
+
+  PrivateSubnetCidr:
+    Description: CIDR block for the private subnet.
+    Default: 10.0.2.0/24
+    Type: String
+
+  AllowedSSHCidr:
+    Description: CIDR block for SSH access (should be restricted)
+    Default: 0.0.0.0/0
+    Type: String
+
+  AllowedWebCidr:
+    Description: CIDR block for web access (HTTP/HTTPS)
+    Default: 0.0.0.0/0
+    Type: String
+
+Resources:
+  # VPC and Network Configuration
+  MidtermVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: ENPM665-midterm-vpc1
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: ENPM665-midterm-igw
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref MidtermVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # Subnets
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MidtermVPC
+      CidrBlock: !Ref PublicSubnetCidr1
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select
+        - 0
+        - !GetAZs ''
+      Tags:
+        - Key: Name
+          Value: Public Subnet 1
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MidtermVPC
+      CidrBlock: !Ref PublicSubnetCidr2
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select
+        - 1
+        - !GetAZs ''
+      Tags:
+        - Key: Name
+          Value: Public Subnet 2
+
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MidtermVPC
+      CidrBlock: !Ref PrivateSubnetCidr
+      AvailabilityZone: !Select
+        - 0
+        - !GetAZs ''
+      Tags:
+        - Key: Name
+          Value: Private Subnet
+
+  # Routing Configuration
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MidtermVPC
+      Tags:
+        - Key: Name
+          Value: Public Route Table
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  # NAT Gateway Configuration
+  NATGatewayEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: AttachGateway
+    Properties:
+      Domain: vpc
+
+  NATGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NATGatewayEIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: ENPM665-NAT-Gateway
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MidtermVPC
+      Tags:
+        - Key: Name
+          Value: Private Route Table
+
+  PrivateSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGateway
+
+  # Security Groups
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref MidtermVPC
+      GroupDescription: Security group for the Application Load Balancer
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          CidrIp: !Ref AllowedWebCidr
+        - IpProtocol: tcp
+          FromPort: '443'
+          ToPort: '443'
+          CidrIp: !Ref AllowedWebCidr
+      Tags:
+        - Key: Name
+          Value: ALB Security Group
+
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref MidtermVPC
+      GroupDescription: Security group for EC2 instances
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+        - IpProtocol: tcp
+          FromPort: '443'
+          ToPort: '443'
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+      Tags:
+        - Key: Name
+          Value: EC2 Security Group
+
+  SSMSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref MidtermVPC
+      GroupDescription: Security group for SSM access
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: '443'
+          ToPort: '443'
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: SSM Security Group
+
+  # Secrets Manager for DB Password
+  DBRootPassword:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: enpm665/DBRootPassword
+      Description: Root password for MariaDB
+      GenerateSecretString:
+        PasswordLength: 16
+        ExcludeCharacters: '"@/\'
+
+  # IAM Role with combined permissions for SSM and Secrets Manager
+  # This role allows EC2 instances to access SSM and Secrets Manager
+  # for retrieving the database root password
+  EC2CombinedRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: AllowDBRootPassword
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref DBRootPassword
+      Path: /
+
+  # Single Instance Profile with combined role
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles:
+        - !Ref EC2CombinedRole
+
+  # Load Balancer Configuration
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: juice-shop-alb
+      Scheme: internet-facing
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      Type: application
+      IpAddressType: ipv4
+      Tags:
+        - Key: Name
+          Value: JuiceShop-ALB
+
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /
+      HealthCheckPort: '80'
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      Port: 80
+      Protocol: HTTP
+      TargetType: instance
+      UnhealthyThresholdCount: 3
+      VpcId: !Ref MidtermVPC
+      Tags:
+        - Key: Name
+          Value: JuiceShop-TG
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+  # Security Monitoring and Controls
+  # CloudTrail Configuration
+  CloudTrailBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+
+  CloudTrailBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref CloudTrailBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AWSCloudTrailAclCheck
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:GetBucketAcl
+            Resource: !Sub arn:aws:s3:::${CloudTrailBucket}
+          - Sid: AWSCloudTrailWrite
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub arn:aws:s3:::${CloudTrailBucket}/AWSLogs/${AWS::AccountId}/*
+
+  CloudTrail:
+    Type: AWS::CloudTrail::Trail
+    DependsOn: CloudTrailBucketPolicy
+    Properties:
+      S3BucketName: !Ref CloudTrailBucket
+      EnableLogFileValidation: true
+      IncludeGlobalServiceEvents: true
+      IsLogging: true
+      IsMultiRegionTrail: true
+      Tags:
+        - Key: Name
+          Value: ENPM665-CloudTrail
+
+  # GuardDuty Configuration
+  GuardDuty:
+    Type: AWS::GuardDuty::Detector
+    Properties:
+      Enable: true
+      FindingPublishingFrequency: FIFTEEN_MINUTES
+
+  # WAF Configuration
+  WebACL:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: JuiceShopWebACL
+      Scope: REGIONAL
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: JuiceShopWebACL
+      Rules:
+        - Name: AWSManagedRulesCommonRuleSet
+          Priority: 0
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesCommonRuleSet
+        - Name: AWSManagedRulesSQLiRuleSet
+          Priority: 1
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesSQLiRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesSQLiRuleSet
+        - Name: RateBasedRule
+          Priority: 2
+          Action:
+            Block: {}
+          Statement:
+            RateBasedStatement:
+              Limit: 100
+              AggregateKeyType: IP
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: RateBasedRule
+
+  WebACLAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    Properties:
+      ResourceArn: !Ref ApplicationLoadBalancer
+      WebACLArn: !GetAtt WebACL.Arn
+
+  # EC2 Auto Scaling Group
+  JuiceShopASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+        - !Ref PrivateSubnet
+      LaunchTemplate:
+        LaunchTemplateId: !Ref EC2LaunchTemplate
+        Version: !GetAtt EC2LaunchTemplate.LatestVersionNumber
+      MinSize: '1'
+      MaxSize: '1'
+      DesiredCapacity: '1'
+      TargetGroupARNs:
+        - !Ref ALBTargetGroup
+      Tags:
+        - Key: Name
+          Value: !Ref InstanceName
+          PropagateAtLaunch: true
+
+  # EC2 Launch Template
+  EC2LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: JuiceShopLaunchTemplate
+      VersionDescription: Initial version
+      LaunchTemplateData:
+        ImageId: !Ref AMIId
+        InstanceType: t2.medium
+        KeyName: !Ref KeyPairName
+        IamInstanceProfile:
+          Name: !Ref EC2InstanceProfile
+        SecurityGroupIds:
+          - !Ref EC2SecurityGroup
+          - !Ref SSMSecurityGroup
+        # Add this to the EC2LaunchTemplate's LaunchTemplateData
+        BlockDeviceMappings:
+          - DeviceName: /dev/sda
+            Ebs:
+              VolumeSize: 20
+              VolumeType: gp3
+              DeleteOnTermination: true
+              Encrypted: true
+
+        # Update the UserData section with the following changes (adding after MariaDB installation)
+        UserData: !Base64
+          Fn::Sub: |
+            #!/bin/bash
+            LOG_FILE="/var/log/user_data.log"
+
+            # Update the instance
+            echo "Updating the instance" | tee -a $LOG_FILE
+            yum update -y 2>&1 | tee -a $LOG_FILE
+
+            # Install SSM agent
+            echo "Installing SSM agent" | tee -a $LOG_FILE
+            yum install -y amazon-ssm-agent 2>&1 | tee -a $LOG_FILE
+            systemctl enable amazon-ssm-agent 2>&1 | tee -a $LOG_FILE
+            systemctl start amazon-ssm-agent 2>&1 | tee -a $LOG_FILE
+
+            # Install required software (Node.js, NPM, and MariaDB)
+            echo "Installing Node.js and MariaDB" | tee -a $LOG_FILE
+            curl -sL https://rpm.nodesource.com/setup_18.x | bash - 2>&1 | tee -a $LOG_FILE
+            yum install -y nodejs mariadb105-server.x86_64 git 2>&1 | tee -a $LOG_FILE
+
+
+            # Start and enable MariaDB
+            echo "Starting and enabling MariaDB" | tee -a $LOG_FILE
+            systemctl start mariadb 2>&1 | tee -a $LOG_FILE
+            systemctl enable mariadb 2>&1 | tee -a $LOG_FILE
+
+
+            # Configure MariaDB encryption
+            echo "Configuring MariaDB encryption" | tee -a $LOG_FILE
+            cat > /etc/my.cnf.d/server.cnf << EOF
+            [mariadb]
+            plugin_load_add = file_key_management
+            file_key_management_filename = /etc/mysql/encryption/keyfile.enc
+            file_key_management_filekey = FILE:/etc/mysql/encryption/keyfile.key
+            file_key_management_encryption_algorithm = AES_CBC
+            innodb_encrypt_tables = ON
+            innodb_encrypt_log = ON
+            innodb_encrypt_temporary_tables = ON
+            EOF
+
+            # Create encryption directory and keys
+            mkdir -p /etc/mysql/encryption 2>&1 | tee -a $LOG_FILE
+            openssl rand -hex 32 > /etc/mysql/encryption/keyfile.key 2>&1 | tee -a $LOG_FILE
+            openssl rand -hex 32 | openssl enc -aes-256-cbc -md sha1 -pass file:/etc/mysql/encryption/keyfile.key -out /etc/mysql/encryption/keyfile.enc 2>&1 | tee -a $LOG_FILE
+            chown -R mysql:mysql /etc/mysql/encryption 2>&1 | tee -a $LOG_FILE
+            chmod 600 /etc/mysql/encryption/keyfile.key /etc/mysql/encryption/keyfile.enc 2>&1 | tee -a $LOG_FILE
+
+            # Restart MariaDB to apply encryption settings
+            systemctl restart mariadb 2>&1 | tee -a $LOG_FILE
+
+            echo "Retrieving DB password from Secrets Manager" | tee -a $LOG_FILE
+            DB_PASS=$(aws secretsmanager get-secret-value --secret-id "enpm665/DBRootPassword" --query SecretString --output text)
+            if [ -z "$DB_PASS" ]; then
+              echo "ERROR: Failed to retrieve DB password" | tee -a $LOG_FILE
+              exit 1
+            fi
+            
+            mysql -u root -e "SET PASSWORD FOR root@'localhost' = PASSWORD('$DB_PASS');"
+            mysql -u root -p"$DB_PASS" -e "CREATE DATABASE juice_shop;"
+            
+            # Ensure /opt directory exists and has the correct permissions
+            echo "Ensuring /opt directory exists" | tee -a $LOG_FILE
+            if [ ! -d /opt ]; then
+              mkdir /opt 2>&1 | tee -a $LOG_FILE
+            fi
+            chown -R ec2-user:ec2-user /opt 2>&1 | tee -a $LOG_FILE
+            chmod -R 755 /opt 2>&1 | tee -a $LOG_FILE
+
+            # Clone the Juice Shop repository to /opt
+            echo "Cloning Juice Shop repository to /opt" | tee -a $LOG_FILE
+            git clone https://github.com/bkimminich/juice-shop.git /opt/juice-shop 2>&1 | tee -a $LOG_FILE
+
+            # Set permissions for the juice-shop directory
+            chown -R ec2-user:ec2-user /opt/juice-shop 2>&1 | tee -a $LOG_FILE
+            cd /opt/juice-shop 2>&1 | tee -a $LOG_FILE
+            echo "In the Juice Shop directory" | tee -a $LOG_FILE
+
+            # Set permissions for the data directory if it exists
+            if [ -d "/opt/juice-shop/data" ]; then
+              chmod -R 755 /opt/juice-shop/data 2>&1 | tee -a $LOG_FILE
+            else
+              echo "Directory 'data/' does not exist, skipping chmod." | tee -a $LOG_FILE
+            fi
+
+            echo "Installing dependencies and starting Juice Shop" | tee -a $LOG_FILE
+            (cd /opt/juice-shop && sudo npm install 2>&1 | tee -a $LOG_FILE)
+            if [ $? -ne 0 ]; then
+              echo "npm install failed. Exiting." | tee -a $LOG_FILE
+              exit 1
+            fi
+
+            # Configure the application to listen on port 80
+            (cd /opt/juice-shop && sudo PORT=80 npm start 2>&1 | tee -a $LOG_FILE) &
+
+Outputs:
+  ALBDNS:
+    Description: The DNS name of the Application Load Balancer
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+
+  CloudTrailName:
+    Description: The name of the CloudTrail
+    Value: !Ref CloudTrail
+
+  GuardDutyDetectorId:
+    Description: The ID of the GuardDuty detector
+    Value: !Ref GuardDuty
+
+  WebACLId:
+    Description: The ID of the Web ACL
+    Value: !Ref WebACL
+
+  EC2InstanceId:
+    Description: Auto Scaling Group ID
+    Value: !Ref JuiceShopASG
+
+  SSMConnectionCommand:
+    Description: Note about connecting to EC2 instances using SSM
+    Value: Use AWS Systems Manager Session Manager to connect to instances in the
+      Auto Scaling Group
